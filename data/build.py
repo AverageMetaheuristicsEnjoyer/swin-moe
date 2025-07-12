@@ -116,6 +116,11 @@ def build_dataset(is_train, config):
             ann_file = prefix + "_map_val.txt"
         dataset = IN22KDATASET(config.DATA.DATA_PATH, ann_file, transform)
         nb_classes = 21841
+    elif config.DATA.DATASET == "tiny-imagenet":
+        prefix = "train" if is_train else "val"
+        root = os.path.join(config.DATA.DATA_PATH, prefix)
+        dataset = datasets.ImageFolder(root, transform = transform)
+        nb_classes = 200
     else:
         raise NotImplementedError("We only support ImageNet Now.")
 
