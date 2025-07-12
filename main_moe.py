@@ -73,8 +73,8 @@ def parse_option():
     # distributed training
     # for pytorch >= 2.0, use `os.environ['LOCAL_RANK']` instead
     # (see https://pytorch.org/docs/stable/distributed.html#launch-utility)
-    if PYTORCH_MAJOR_VERSION == 1:
-        parser.add_argument("--local_rank", type=int, required=True, help='local rank for DistributedDataParallel')
+    # if PYTORCH_MAJOR_VERSION == 1:
+    #     parser.add_argument("--local_rank", type=int, required=True, help='local rank for DistributedDataParallel')
 
     args, unparsed = parser.parse_known_args()
 
