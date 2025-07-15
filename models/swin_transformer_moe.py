@@ -485,7 +485,10 @@ class SwinTransformerBlock(nn.Module):
         shortcut = x
         x = self.norm2(x)
         if self.is_moe:
-            x, l_aux, momentum = self.mlp(x, momentum)
+            if self.use_momentum:
+                x, l_aux, momentum = self.mlp(x, momentum)
+            else:
+                x, l_aux = self.mlp(x)
             x = shortcut + self.drop_path(x)
             return x, l_aux, momentum
         else:
