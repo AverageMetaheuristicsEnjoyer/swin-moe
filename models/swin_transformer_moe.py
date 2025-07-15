@@ -135,7 +135,7 @@ class MarsMlp(MoEMlp):
             c_norm = torch.linalg.matrix_norm(c, dim = (-2, -1), ord = "fro")
             scaling_facs = torch.maximum(
                 torch.tensor(1.0, device = c.device),
-                c_norm / self.c_norm_thresh,
+                c_norm / 1.0,
             )
         c_t = c / scaling_facs.view(-1, 1, 1)
 
