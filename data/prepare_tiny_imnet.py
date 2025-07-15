@@ -1,7 +1,6 @@
 import argparse
 import os
 import shutil
-import tqdm
 
 def restructure_val(data_path):
     # val_path = path + "val/"
@@ -17,7 +16,7 @@ def restructure_val(data_path):
         img_to_class[img_name] = class_id
 
     val_imgs_dir = os.path.join(val_path, "images")
-    for img_name, class_id in tqdm.tqdm(img_to_class.items()):
+    for img_name, class_id in img_to_class.items():
         class_path = os.path.join(val_path, class_id)
         if not os.path.exists(class_path):
             os.mkdir(class_path)
