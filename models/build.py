@@ -99,7 +99,15 @@ def build_model(config, is_pretrain=False):
                                    cosine_router_dim=config.MODEL.SWIN_MOE.COSINE_ROUTER_DIM,
                                    cosine_router_init_t=config.MODEL.SWIN_MOE.COSINE_ROUTER_INIT_T,
                                    moe_drop=config.MODEL.SWIN_MOE.MOE_DROP,
-                                   aux_loss_weight=config.MODEL.SWIN_MOE.AUX_LOSS_WEIGHT)
+                                   aux_loss_weight=config.MODEL.SWIN_MOE.AUX_LOSS_WEIGHT,
+                                   
+                                   use_momentum=config.MODEL.SWIN_MOE.USE_MOMENTUM,
+                                   momentum_type=config.MODEL.SWIN_MOE.MOMENTUM_TYPE,
+                                   moe_gamma1=config.MODEL.SWIN_MOE.MOE_GAMMA1,
+                                   moe_gamma2=config.MODEL.SWIN_MOE.MOE_GAMMA2,
+                                   moe_mu=config.MODEL.SWIN_MOE.MOE_MU,
+                                   moe_beta1=config.MODEL.SWIN_MOE.MOE_BETA1,
+                                   moe_beta2=config.MODEL.SWIN_MOE.MOE_BETA2)
     elif model_type == 'swin_mlp':
         model = SwinMLP(img_size=config.DATA.IMG_SIZE,
                         patch_size=config.MODEL.SWIN_MLP.PATCH_SIZE,

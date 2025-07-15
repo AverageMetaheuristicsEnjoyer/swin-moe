@@ -101,6 +101,52 @@ class MoEMlp(nn.Module):
             nn.init.constant_(self._moe_layer.experts.batched_fc2_bias, 0)
 
 
+class MomentumMlp(MoEMlp):
+    def __init__(self, moe_mu = 0.7, moe_gamma = 1.0, **kwargs):
+        super().__init__(**kwargs)
+        self.mu = moe_mu
+        self.gamma = moe_gamma
+    
+    def forward(self, x, momentum):
+        moe_out, l_aux = super().forward(x)
+
+        momentum = -moe_out + self.mu * momentum
+        output = self.gamma * momentum
+
+        return output, l_aux, momentum        
+
+
+class MarsMlp(MoEMlp):
+    def __init__(self, moe_gamma1 = 1.0, moe_gamma2 = 1.0, moe_beta1 = 0.9, moe_beta2 = 0.999, **kwargs):
+        super().__init__(**kwargs)
+        self.gamma1 = moe_gamma1
+        self.gamma2 = moe_gamma2
+        self.beta1 = moe_beta1
+        self.beta2 = moe_beta2
+    
+    def forward(self, x, momentum):
+        moe_out, l_aux = super().forward(x)
+
+        m, v, moe_out_prev = momentum
+        outps_diff = -moe_out - (-moe_out_prev)
+        c = -moe_out + self.gamma2 * (self.beta1 / (1 - self.beta1)) * outps_diff
+        
+        with torch.no_grad():
+            c_norm = torch.linalg.matrix_norm(c, dim = (-2, -1), ord = "fro")
+            scaling_facs = torch.maximum(
+                torch.tensor(1.0, device = c.device),
+                c_norm / self.c_norm_thresh,
+            )
+        c_t = c / scaling_facs.view(-1, 1, 1)
+
+        m_t = self.beta1 * m + (1 - self.beta1) * c_t
+        v_t = self.beta2 * v + (1 - self.beta2) * c_t**2
+
+        out = -(self.gamma1 * m_t / (torch.sqrt(v_t + 1e-8)))
+
+        return out, l_aux, (m_t, v_t, moe_out.detach())
+
+
 def window_partition(x, window_size):
     """
     Args:
@@ -294,7 +340,10 @@ class SwinTransformerBlock(nn.Module):
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm, mlp_fc2_bias=True, init_std=0.02, pretrained_window_size=0,
                  is_moe=False, num_local_experts=1, top_value=1, capacity_factor=1.25, cosine_router=False,
                  normalize_gate=False, use_bpr=True, is_gshard_loss=True, gate_noise=1.0,
-                 cosine_router_dim=256, cosine_router_init_t=0.5, moe_drop=0.0):
+                 cosine_router_dim=256, cosine_router_init_t=0.5, moe_drop=0.0,
+                 use_momentum=False, momentum_type=None,
+                 moe_gamma1=1.0, moe_gamma2=1.0, moe_mu=0.7,
+                 moe_beta1=0.9, moe_beta2=0.999):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
@@ -305,6 +354,8 @@ class SwinTransformerBlock(nn.Module):
         self.is_moe = is_moe
         self.capacity_factor = capacity_factor
         self.top_value = top_value
+        self.use_momentum = use_momentum
+        self.momentum_type = momentum_type
 
         if min(self.input_resolution) <= self.window_size:
             # if window size is larger than input resolution, we don't partition windows
@@ -322,21 +373,51 @@ class SwinTransformerBlock(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         if self.is_moe:
-            self.mlp = MoEMlp(in_features=dim,
-                              hidden_features=mlp_hidden_dim,
-                              num_local_experts=num_local_experts,
-                              top_value=top_value,
-                              capacity_factor=capacity_factor,
-                              cosine_router=cosine_router,
-                              normalize_gate=normalize_gate,
-                              use_bpr=use_bpr,
-                              is_gshard_loss=is_gshard_loss,
-                              gate_noise=gate_noise,
-                              cosine_router_dim=cosine_router_dim,
-                              cosine_router_init_t=cosine_router_init_t,
-                              moe_drop=moe_drop,
-                              mlp_fc2_bias=mlp_fc2_bias,
-                              init_std=init_std)
+            if self.use_momentum:
+                if self.momentum_type == "mars":
+                    self.mlp = MarsMlp(
+                        in_features=dim, hidden_features=mlp_hidden_dim,
+                        num_local_experts=num_local_experts, top_value=top_value,
+                        moe_gamma1=moe_gamma1, moe_beta1=moe_beta1, moe_beta2=moe_beta2,
+                        
+                        capacity_factor=capacity_factor, cosine_router=cosine_router,
+                        normalize_gate=normalize_gate, use_bpr=use_bpr,
+                        is_gshard_loss=is_gshard_loss, gate_noise=gate_noise,
+                        cosine_router_dim=cosine_router_dim,
+                        cosine_router_init_t=cosine_router_init_t,
+                        moe_drop=moe_drop, mlp_fc2_bias=mlp_fc2_bias, init_std=init_std
+                    )
+                elif self.momentum_type == "hb":
+                    self.mlp = MomentumMlp(
+                        in_features=dim, hidden_features=mlp_hidden_dim,
+                        num_local_experts=num_local_experts, top_value=top_value,
+                        moe_mu=moe_mu, moe_gamma=moe_gamma2,
+                        
+                        capacity_factor=capacity_factor, cosine_router=cosine_router,
+                        normalize_gate=normalize_gate, use_bpr=use_bpr,
+                        is_gshard_loss=is_gshard_loss, gate_noise=gate_noise,
+                        cosine_router_dim=cosine_router_dim,
+                        cosine_router_init_t=cosine_router_init_t,
+                        moe_drop=moe_drop, mlp_fc2_bias=mlp_fc2_bias, init_std=init_std
+                    )
+                else:
+                    ValueError("Wrong momentum type")
+            else:
+                self.mlp = MoEMlp(in_features=dim,
+                                hidden_features=mlp_hidden_dim,
+                                num_local_experts=num_local_experts,
+                                top_value=top_value,
+                                capacity_factor=capacity_factor,
+                                cosine_router=cosine_router,
+                                normalize_gate=normalize_gate,
+                                use_bpr=use_bpr,
+                                is_gshard_loss=is_gshard_loss,
+                                gate_noise=gate_noise,
+                                cosine_router_dim=cosine_router_dim,
+                                cosine_router_init_t=cosine_router_init_t,
+                                moe_drop=moe_drop,
+                                mlp_fc2_bias=mlp_fc2_bias,
+                                init_std=init_std)
         else:
             self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop,
                            mlp_fc2_bias=mlp_fc2_bias)
@@ -366,7 +447,7 @@ class SwinTransformerBlock(nn.Module):
 
         self.register_buffer("attn_mask", attn_mask)
 
-    def forward(self, x):
+    def forward(self, x, momentum):
         H, W = self.input_resolution
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
@@ -404,12 +485,12 @@ class SwinTransformerBlock(nn.Module):
         shortcut = x
         x = self.norm2(x)
         if self.is_moe:
-            x, l_aux = self.mlp(x)
+            x, l_aux, momentum = self.mlp(x, momentum)
             x = shortcut + self.drop_path(x)
-            return x, l_aux
+            return x, l_aux, momentum
         else:
             x = shortcut + self.drop_path(self.mlp(x))
-            return x
+            return x, 0.0, momentum
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
@@ -524,13 +605,18 @@ class BasicLayer(nn.Module):
                  mlp_fc2_bias=True, init_std=0.02, use_checkpoint=False, pretrained_window_size=0,
                  moe_block=[-1], num_local_experts=1, top_value=1, capacity_factor=1.25, cosine_router=False,
                  normalize_gate=False, use_bpr=True, is_gshard_loss=True,
-                 cosine_router_dim=256, cosine_router_init_t=0.5, gate_noise=1.0, moe_drop=0.0):
+                 cosine_router_dim=256, cosine_router_init_t=0.5, gate_noise=1.0, moe_drop=0.0,
+                 use_momentum=False, momentum_type=None,
+                 moe_gamma1=1.0, moe_gamma2=1.0, moe_mu=0.7,
+                 moe_beta1=0.9, moe_beta2=0.999):
 
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
         self.use_checkpoint = use_checkpoint
+        self.use_momentum = use_momentum
+        self.momentum_type = momentum_type
 
         # build blocks
         self.blocks = nn.ModuleList([
@@ -557,7 +643,16 @@ class BasicLayer(nn.Module):
                                  gate_noise=gate_noise,
                                  cosine_router_dim=cosine_router_dim,
                                  cosine_router_init_t=cosine_router_init_t,
-                                 moe_drop=moe_drop)
+                                 moe_drop=moe_drop,
+                                 
+                                 use_momentum=use_momentum,
+                                 momentum_type=momentum_type,
+                                 moe_gamma1=moe_gamma1,
+                                 moe_gamma2=moe_gamma2,
+                                 moe_mu=moe_mu,
+                                 moe_beta1=moe_beta1,
+                                 moe_beta2=moe_beta2,
+                                 )
             for i in range(depth)])
 
         # patch merging layer
@@ -568,17 +663,29 @@ class BasicLayer(nn.Module):
 
     def forward(self, x):
         l_aux = 0.0
+        if self.use_momentum:
+            if self.momentum_type == "mars":
+                momentum = (
+                    torch.zeros_like(x),
+                    torch.zeros_like(x),
+                    torch.zeros_like(x),
+                )
+            elif self.momentum_type == "hb":
+                momentum = torch.zeros_like(x)
+            else:
+                ValueError("Wrong momentum type")
+        else:
+            momentum = torch.zeros_like(x)
         for blk in self.blocks:
             if self.use_checkpoint:
-                out = checkpoint.checkpoint(blk, x)
+                out = checkpoint.checkpoint(blk, x, momentum)
             else:
-                out = blk(x)
-            if isinstance(out, tuple):
-                x = out[0]
-                cur_l_aux = out[1]
-                l_aux = cur_l_aux + l_aux
-            else:
-                x = out
+                out = blk(x, momentum)
+
+            x = out[0]
+            cur_l_aux = out[1]
+            l_aux = cur_l_aux + l_aux
+            momentum = out[2]
 
         if self.downsample is not None:
             x = self.downsample(x)
@@ -695,7 +802,11 @@ class SwinTransformerMoE(nn.Module):
                  mlp_fc2_bias=True, init_std=0.02, use_checkpoint=False, pretrained_window_sizes=[0, 0, 0, 0],
                  moe_blocks=[[-1], [-1], [-1], [-1]], num_local_experts=1, top_value=1, capacity_factor=1.25,
                  cosine_router=False, normalize_gate=False, use_bpr=True, is_gshard_loss=True, gate_noise=1.0,
-                 cosine_router_dim=256, cosine_router_init_t=0.5, moe_drop=0.0, aux_loss_weight=0.01, **kwargs):
+                 cosine_router_dim=256, cosine_router_init_t=0.5, moe_drop=0.0, aux_loss_weight=0.01,
+                 
+                 use_momentum=False, momentum_type=None,
+                 moe_gamma1=1.0, moe_gamma2=1.0, moe_mu=0.7,
+                 moe_beta1=0.9, moe_beta2=0.999, **kwargs):
         super().__init__()
         self._ddp_params_and_buffers_to_ignore = list()
 
@@ -762,7 +873,15 @@ class SwinTransformerMoE(nn.Module):
                                gate_noise=gate_noise,
                                cosine_router_dim=cosine_router_dim,
                                cosine_router_init_t=cosine_router_init_t,
-                               moe_drop=moe_drop)
+                               moe_drop=moe_drop,
+                               
+                               use_momentum=use_momentum,
+                               momentum_type=momentum_type,
+                               moe_gamma1=moe_gamma1,
+                               moe_gamma2=moe_gamma2,
+                               moe_mu=moe_mu,
+                               moe_beta1=moe_beta1,
+                               moe_beta2=moe_beta2)
             self.layers.append(layer)
 
         self.norm = norm_layer(self.num_features)
